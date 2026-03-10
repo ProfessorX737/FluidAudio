@@ -118,6 +118,26 @@ public struct PipelineTimings: Sendable, Codable {
     }
 }
 
+/// Per-frame speaker activation probabilities for fine-grained diarization.
+/// Each entry represents one frame (~17ms) with activation scores per speaker.
+public struct FrameSpeakerProbabilities: Sendable {
+    /// Time in seconds for this frame
+    public let timeSeconds: Float
+    /// Duration of each frame in seconds
+    public let frameDurationSeconds: Float
+    /// Activation score per speaker (indexed by cluster ID, higher = more likely)
+    public let speakerScores: [Float]
+    /// Speaker IDs corresponding to each index (e.g., ["S1", "S2"])
+    public let speakerIds: [String]
+
+    public init(timeSeconds: Float, frameDurationSeconds: Float, speakerScores: [Float], speakerIds: [String]) {
+        self.timeSeconds = timeSeconds
+        self.frameDurationSeconds = frameDurationSeconds
+        self.speakerScores = speakerScores
+        self.speakerIds = speakerIds
+    }
+}
+
 public struct DiarizationResult: Sendable {
     public let segments: [TimedSpeakerSegment]
 
@@ -127,14 +147,20 @@ public struct DiarizationResult: Sendable {
     /// Performance timings collected during diarization
     public let timings: PipelineTimings?
 
+    /// Per-frame speaker activation probabilities (fine-grained, ~17ms resolution).
+    /// Available when using offline diarization pipeline.
+    public let frameProbabilities: [FrameSpeakerProbabilities]?
+
     public init(
         segments: [TimedSpeakerSegment],
         speakerDatabase: [String: [Float]]? = nil,
-        timings: PipelineTimings? = nil
+        timings: PipelineTimings? = nil,
+        frameProbabilities: [FrameSpeakerProbabilities]? = nil
     ) {
         self.segments = segments
         self.speakerDatabase = speakerDatabase
         self.timings = timings
+        self.frameProbabilities = frameProbabilities
     }
 }
 

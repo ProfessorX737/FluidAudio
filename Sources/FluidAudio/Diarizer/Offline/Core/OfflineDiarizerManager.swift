@@ -305,6 +305,12 @@ public final class OfflineDiarizerManager {
             centroids: centroids
         )
 
+        let frameProbabilities = reconstruction.buildFrameProbabilities(
+            segmentation: segmentation,
+            hardClusters: chunkAssignments,
+            centroids: centroids
+        )
+
         let speakerDatabase = reconstruction.buildSpeakerDatabase(segments: segments)
 
         if let exportPath = config.embeddingExportPath {
@@ -328,7 +334,8 @@ public final class OfflineDiarizerManager {
         return DiarizationResult(
             segments: segments,
             speakerDatabase: speakerDatabase,
-            timings: timings
+            timings: timings,
+            frameProbabilities: frameProbabilities
         )
     }
 

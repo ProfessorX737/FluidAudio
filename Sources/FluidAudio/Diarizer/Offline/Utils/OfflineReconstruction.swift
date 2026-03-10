@@ -149,37 +149,13 @@ struct OfflineReconstruction {
             speakerCountHistogram[rounded, default: 0] += 1
         }
 
-        // When clustering found multiple speakers and a minimum is configured,
-        // ensure each active frame considers at least that many speakers.
-        // Without this, the segmentation model's per-frame speaker count estimate
-        // (often 1 for single-mic audio) causes the minority speaker to be dropped
-        // during reconstruction even though clustering correctly identified them.
-        let minReconstructionSpeakers: Int
-        if let exact = config.clustering.numSpeakers, exact > 1 {
-            minReconstructionSpeakers = min(exact, maxAllowedSpeakers)
-        } else if let minSp = config.clustering.minSpeakers, minSp > 1 {
-            minReconstructionSpeakers = min(minSp, maxAllowedSpeakers)
-        } else if clusterCount > 1 {
-            // Auto-detected multiple speakers: ensure at least 2 per active frame
-            minReconstructionSpeakers = min(clusterCount, maxAllowedSpeakers)
-        } else {
-            minReconstructionSpeakers = 1
-        }
-
-        if minReconstructionSpeakers > 1 {
-            for frame in 0..<totalFrames where speakerCountPerFrame[frame] > 0 {
-                speakerCountPerFrame[frame] = max(
-                    speakerCountPerFrame[frame], minReconstructionSpeakers)
-            }
-        }
-
         if !speakerCountHistogram.isEmpty {
             let histogramString =
                 speakerCountHistogram
                 .sorted { $0.key < $1.key }
                 .map { "\($0.key):\($0.value)" }
                 .joined(separator: ", ")
-            logger.debug("Speaker-count histogram \(histogramString) (minReconstruction: \(minReconstructionSpeakers))")
+            logger.debug("Speaker-count histogram \(histogramString)")
         }
 
         var perFrameClusters = [[Int]](repeating: [], count: totalFrames)
@@ -241,6 +217,100 @@ struct OfflineReconstruction {
 
         let merged = mergeSegments(rawSegments, gapThreshold: gapThreshold)
         return sanitize(segments: merged)
+    }
+
+    /// Extract per-frame speaker activation averages for fine-grained diarization.
+    /// Returns one entry per frame (~17ms resolution) with activation scores per speaker cluster.
+    func buildFrameProbabilities(
+        segmentation: SegmentationOutput,
+        hardClusters: [[Int]],
+        centroids: [[Double]]
+    ) -> [FrameSpeakerProbabilities] {
+        guard segmentation.numChunks > 0, segmentation.numFrames > 0 else { return [] }
+
+        let frameDuration = segmentation.frameDuration
+        guard frameDuration > 0 else { return [] }
+
+        let clusterCount = max(centroids.count, 1)
+
+        var maxTime = 0.0
+        for chunkIndex in 0..<segmentation.numChunks {
+            let offset = chunkStartTime(for: chunkIndex, segmentation: segmentation)
+            let end = offset + Double(segmentation.numFrames) * frameDuration
+            if end > maxTime { maxTime = end }
+        }
+
+        let totalFrames = max(1, Int(ceil(maxTime / frameDuration)))
+        var activationSums = Array(repeating: Array(repeating: 0.0, count: clusterCount), count: totalFrames)
+        var activationCounts = Array(repeating: Array(repeating: 0.0, count: clusterCount), count: totalFrames)
+
+        for chunkIndex in 0..<segmentation.numChunks {
+            guard chunkIndex < segmentation.speakerWeights.count else { continue }
+            let chunkWeights = segmentation.speakerWeights[chunkIndex]
+            guard !chunkWeights.isEmpty else { continue }
+
+            let chunkOffset = chunkStartTime(for: chunkIndex, segmentation: segmentation)
+            let chunkAssignments = chunkIndex < hardClusters.count
+                ? hardClusters[chunkIndex]
+                : Array(repeating: -2, count: segmentation.numSpeakers)
+
+            for frameIndex in 0..<chunkWeights.count {
+                let frameStart = chunkOffset + Double(frameIndex) * frameDuration
+                var globalFrame = Int((frameStart / frameDuration).rounded())
+                globalFrame = max(0, min(globalFrame, totalFrames - 1))
+
+                let weights = chunkWeights[frameIndex]
+                var frameActivations = [Double](repeating: 0, count: clusterCount)
+
+                for speakerIndex in 0..<min(weights.count, chunkAssignments.count) {
+                    let cluster = chunkAssignments[speakerIndex]
+                    guard cluster >= 0, cluster < clusterCount else { continue }
+                    let value = Double(weights[speakerIndex])
+                    if value > frameActivations[cluster] {
+                        frameActivations[cluster] = value
+                    }
+                }
+
+                for cluster in 0..<clusterCount {
+                    let value = frameActivations[cluster]
+                    if value > 0 {
+                        activationSums[globalFrame][cluster] += value
+                        activationCounts[globalFrame][cluster] += 1
+                    }
+                }
+            }
+        }
+
+        // Build speaker IDs
+        let speakerIds = (0..<clusterCount).map { "S\($0 + 1)" }
+
+        var result: [FrameSpeakerProbabilities] = []
+        result.reserveCapacity(totalFrames)
+
+        for frame in 0..<totalFrames {
+            let sums = activationSums[frame]
+            let counts = activationCounts[frame]
+            var averages = [Float](repeating: 0, count: clusterCount)
+
+            for cluster in 0..<clusterCount {
+                if counts[cluster] > 0 {
+                    averages[cluster] = Float(sums[cluster] / counts[cluster])
+                }
+            }
+
+            // Skip silent frames (no activation for any speaker)
+            let hasActivity = averages.contains(where: { $0 > 0 })
+            guard hasActivity else { continue }
+
+            result.append(FrameSpeakerProbabilities(
+                timeSeconds: Float(Double(frame) * frameDuration),
+                frameDurationSeconds: Float(frameDuration),
+                speakerScores: averages,
+                speakerIds: speakerIds
+            ))
+        }
+
+        return result
     }
 
     func buildSpeakerDatabase(
