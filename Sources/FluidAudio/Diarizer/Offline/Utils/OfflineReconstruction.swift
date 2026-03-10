@@ -149,13 +149,37 @@ struct OfflineReconstruction {
             speakerCountHistogram[rounded, default: 0] += 1
         }
 
+        // When clustering found multiple speakers and a minimum is configured,
+        // ensure each active frame considers at least that many speakers.
+        // Without this, the segmentation model's per-frame speaker count estimate
+        // (often 1 for single-mic audio) causes the minority speaker to be dropped
+        // during reconstruction even though clustering correctly identified them.
+        let minReconstructionSpeakers: Int
+        if let exact = config.clustering.numSpeakers, exact > 1 {
+            minReconstructionSpeakers = min(exact, maxAllowedSpeakers)
+        } else if let minSp = config.clustering.minSpeakers, minSp > 1 {
+            minReconstructionSpeakers = min(minSp, maxAllowedSpeakers)
+        } else if clusterCount > 1 {
+            // Auto-detected multiple speakers: ensure at least 2 per active frame
+            minReconstructionSpeakers = min(clusterCount, maxAllowedSpeakers)
+        } else {
+            minReconstructionSpeakers = 1
+        }
+
+        if minReconstructionSpeakers > 1 {
+            for frame in 0..<totalFrames where speakerCountPerFrame[frame] > 0 {
+                speakerCountPerFrame[frame] = max(
+                    speakerCountPerFrame[frame], minReconstructionSpeakers)
+            }
+        }
+
         if !speakerCountHistogram.isEmpty {
             let histogramString =
                 speakerCountHistogram
                 .sorted { $0.key < $1.key }
                 .map { "\($0.key):\($0.value)" }
                 .joined(separator: ", ")
-            logger.debug("Speaker-count histogram \(histogramString)")
+            logger.debug("Speaker-count histogram \(histogramString) (minReconstruction: \(minReconstructionSpeakers))")
         }
 
         var perFrameClusters = [[Int]](repeating: [], count: totalFrames)
