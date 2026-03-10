@@ -162,7 +162,7 @@ struct OfflineReconstruction {
         for frame in 0..<totalFrames {
             let required = speakerCountPerFrame[frame]
             guard required > 0 else { continue }
-            let ranked = activationSums[frame].enumerated().sorted { $0.element > $1.element }
+            let ranked = activationAverages[frame].enumerated().sorted { $0.element > $1.element }
             let selected = ranked.prefix(required).map { $0.offset }
             perFrameClusters[frame] = selected
         }
